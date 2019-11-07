@@ -17,6 +17,13 @@ from keras import backend as K
 
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '1' # 2,3'
+from mnist_cnn import load_mnist
+
+x_train, y_train, x_test, y_test = load_mnist()
+
+prev_filters = np.load('filters_incre_conv2d_4.npz')['filters']
+prev_filters = [prev_filters[i][0] for i in range(len(prev_filters))]
+prev_filters = np.array(prev_filters)
 
 
 def normalize(x):
@@ -76,12 +83,16 @@ def process_image(x, former):
 
 def visualize_layer(model,
                     layer_name,
-                    step=0.05,
+                    step=0.005,
                     epochs=10,
-                    upscaling_steps=2,
-                    upscaling_factor=1.2,
-                    output_dim=(95, 95),
-                    filter_range=(0, None)):
+                    upscaling_steps=1,
+                    upscaling_factor=1,
+                    output_dim=(28, 28),
+                    filter_range=(0, None),
+                    max_retry=500,
+                    init='train_random',
+                    center=True,
+                    ):
     """Visualizes the most relevant filters of one conv-layer in a certain model.
 
     # Arguments
@@ -122,10 +133,16 @@ def visualize_layer(model,
 
         # we build a loss function that maximizes the activation
         # of the nth filter of the layer considered
+
+        out_shape = layer_output.get_shape()
+
         if K.image_data_format() == 'channels_first':
             loss = K.mean(layer_output[:, filter_index, :, :])
         else:
-            loss = K.mean(layer_output[:, :, :, filter_index])
+            if center:
+                loss = K.mean(layer_output[:, int((int(out_shape[1]) + 1)/2) - 1, int((int(out_shape[2]) + 1)/2) - 1, filter_index])
+            else:
+                loss = K.mean(layer_output[:, :, :, filter_index])
 
         # we compute the gradient of the input picture wrt this loss
         grads = K.gradients(loss, input_img)[0]
@@ -139,52 +156,69 @@ def visualize_layer(model,
         # we start from a gray image with some random noise
         intermediate_dim = tuple(
             int(x / (upscaling_factor ** upscaling_steps)) for x in output_dim)
-        if K.image_data_format() == 'channels_first':
-            input_img_data = np.random.random(
-                (1, num_channels, intermediate_dim[0], intermediate_dim[1]))
-        else:
-            input_img_data = np.random.random(
-                (1, intermediate_dim[0], intermediate_dim[1], num_channels))
-        input_img_data = (input_img_data - 0.5) * 20 + 128
 
-        # Slowly upscaling towards the original size prevents
-        # a dominating high-frequency of the to visualized structure
-        # as it would occur if we directly compute the 412d-image.
-        # Behaves as a better starting point for each following dimension
-        # and therefore avoids poor local minima
-        for up in reversed(range(upscaling_steps)):
-            # we run gradient ascent for e.g. 20 steps
-            for _ in range(epochs):
-                loss_value, grads_value = iterate([input_img_data])
-                input_img_data += grads_value * step
+        # print(intermediate_dim)
 
-                # some filters get stuck to 0, we can skip them
-                if loss_value <= K.epsilon():
-                    return None
+        for retry in range(max_retry):
+            skip = False
 
-            # Calulate upscaled dimension
-            intermediate_dim = tuple(
-                int(x / (upscaling_factor ** up)) for x in output_dim)
-            # Upscale
-            img = deprocess_image(input_img_data[0])
-            # img = np.concatenate([img]*3, axis=-1)
+            if K.image_data_format() == 'channels_first':
+                input_img_data = np.random.random(
+                    (1, num_channels, intermediate_dim[0], intermediate_dim[1]))
+            else:
+                if init == 'random':
+                    input_img_data = np.random.random(
+                        (1, intermediate_dim[0], intermediate_dim[1], num_channels))
+                elif init == 'filters':
+                    input_img_data = np.average(prev_filters[np.random.randint(len(prev_filters), size=(1,))], axis=0)
+                    input_img_data = input_img_data / np.max(input_img_data)
+                    input_img_data = np.expand_dims(input_img_data, 0)
+                elif init == 'train_index':
+                    ## choose random image from x_train with filter index
+                    indexes = np.where(y_train[:,filter_index] == 1)
+                    indexes = indexes[0]
+                    input_img_data = x_train[np.random.choice(indexes, size=1)]
+                elif init == 'train_random':
+                    ## choose random image from x_train
+                    input_img_data = x_train[np.random.randint(len(x_train), size=(1,))]
 
-            # print(img.shape)
-            # img = np.array(pil_image.fromarray(img).resize(intermediate_dim,
-            #                                                pil_image.BICUBIC))
-            import cv2
-            img = cv2.resize(img, intermediate_dim)
-            print(img.shape)
-            img = np.expand_dims(img, -1)
+            # Slowly upscaling towards the original size prevents
+            # a dominating high-frequency of the to visualized structure
+            # as it would occur if we directly compute the 412d-image.
+            # Behaves as a better starting point for each following dimension
+            # and therefore avoids poor local minima
+            for up in reversed(range(upscaling_steps)):
+                # we run gradient ascent for e.g. 20 steps
+                for _ in range(epochs):
+                    loss_value, grads_value = iterate([input_img_data])
+                    input_img_data += grads_value * step
+                    # some filters get stuck to 0, we can skip them
+                    if loss_value <= K.epsilon():
+                        skip = True
+                        break
 
-            input_img_data = [process_image(img, input_img_data[0])]
+                if skip: break
+
+                # Calulate upscaled dimension
+                intermediate_dim = tuple(
+                    int(x / (upscaling_factor ** up)) for x in output_dim)
+                # Upscale
+                img = deprocess_image(input_img_data[0])
+
+                import cv2
+                img = cv2.resize(img, intermediate_dim)
+                img = np.expand_dims(img, -1)
+
+                input_img_data = [process_image(img, input_img_data[0])]
+
+            if not skip:
+                print('retries = {}'.format(retry + 1))
+                break
 
         # decode the resulting input image
         img = deprocess_image(input_img_data[0])
         e_time = time.time()
-        print('Costs of filter {:3}: {:5.0f} ( {:4.2f}s )'.format(filter_index,
-                                                                  loss_value,
-                                                                  e_time - s_time))
+        print('Costs of filter {:3}: {:5.0f} ( {:4.2f}s )'.format(filter_index, loss_value, e_time - s_time))
         return img, loss_value
 
     def _draw_filters(filters, n=None):
@@ -197,12 +231,13 @@ def visualize_layer(model,
                If none, the largest possible square will be used
         """
         if n is None:
-            n = int(np.floor(np.sqrt(len(filters))))
+            # n = int(np.floor(np.sqrt(len(filters))))
+            n = int(np.ceil(np.sqrt(len(filters))))
 
         # the filters that have the highest loss are assumed to be better-looking.
         # we will only keep the top n*n filters.
-        filters.sort(key=lambda x: x[1], reverse=True)
-        filters = filters[:n * n]
+        # filters.sort(key=lambda x: x[1], reverse=True)
+        # filters = filters[:n * n]
 
         # build a black picture with enough space for
         # e.g. our 8 x 8 filters of size 412 x 412, with a 5px margin in between
@@ -214,12 +249,13 @@ def visualize_layer(model,
         # fill the picture with our saved filters
         for i in range(n):
             for j in range(n):
-                img, _ = filters[i * n + j]
-                width_margin = (output_dim[0] + MARGIN) * i
-                height_margin = (output_dim[1] + MARGIN) * j
-                stitched_filters[
-                    width_margin: width_margin + output_dim[0],
-                    height_margin: height_margin + output_dim[1], :] = img
+                if i*n + j < len(filters):
+                    img, _ = filters[i * n + j]
+                    width_margin = (output_dim[0] + MARGIN) * i
+                    height_margin = (output_dim[1] + MARGIN) * j
+                    stitched_filters[
+                        width_margin: width_margin + output_dim[0],
+                        height_margin: height_margin + output_dim[1], :] = img
 
         # save the result to disk
         save_img('{0:}_{1:}_{2:}x{2:}.png'.format(model.name, layer_name, n), stitched_filters)
@@ -234,7 +270,8 @@ def visualize_layer(model,
     output_layer = layer_dict[layer_name]
     assert isinstance(output_layer, layers.Conv2D)
 
-    print (output_layer.get_weights()[0].shape, output_layer.get_weights()[1].shape )
+    print ('weight shape = {}, bias shape = {}'
+           .format(output_layer.get_weights()[0].shape, output_layer.get_weights()[1].shape))
 
     # Compute to be processed filter range
     filter_lower = filter_range[0]
@@ -255,25 +292,13 @@ def visualize_layer(model,
             processed_filters.append(img_loss)
 
     print('{} filter processed.'.format(len(processed_filters)))
+
+    # saved filters
+    np.savez('filters_incre_%s.npz' %(layer_name), filters=np.array(processed_filters))
+
     # Finally draw and store the best filters to disk
     _draw_filters(processed_filters)
 
 
 if __name__ == '__main__':
-    from mnist_cnn import buildModel
-
-    model = buildModel()
-    model.summary()
-    model.load_weights('mnist_op.h5')
-    # the name of the layer we want to visualize
-    # (see model definition at keras/applications/vgg16.py)
-    LAYER_NAME = 'block5_conv1'
-    LAYER_NAME = 'conv2d_2'
-
-    # build the VGG16 network with ImageNet weights
-    # vgg = vgg16.VGG16(weights='imagenet', include_top=False)
-    # print('Model loaded.')
-    # vgg.summary()
-
-    # example function call
-    visualize_layer(model, LAYER_NAME)
+    pass

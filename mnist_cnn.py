@@ -9,7 +9,7 @@ from __future__ import print_function
 import keras
 from keras.datasets import mnist
 from keras.models import Sequential, Model
-from keras.layers import Dense, Dropout, Flatten, Input
+from keras.layers import Dense, Dropout, Flatten, Input, LeakyReLU, Activation
 from keras.layers import Conv2D, MaxPooling2D
 from keras import backend as K
 
@@ -55,15 +55,23 @@ def load_mnist():
 def buildModel():
     input_shape = (28, 28, 1)
     inputs = Input(shape=input_shape)
-    x = Conv2D(32, 3, activation='relu', input_shape=input_shape)(inputs)
-    x = Conv2D(64, 3, activation='relu')(x)
+    x = Conv2D(32, 3, input_shape=input_shape)(inputs)
+    x = LeakyReLU()(x)
+    x = Conv2D(64, 3)(x)
+    x = LeakyReLU()(x)
     x = MaxPooling2D()(x)
-    x = Conv2D(64, 3, activation='relu')(x)
+    x = Conv2D(64, 3)(x)
+    x = LeakyReLU()(x)
     x = MaxPooling2D()(x)
-    x = Conv2D(64, 3, activation='relu')(x)
-    x = Conv2D(64, 3, activation='relu', padding='valid')(x)
-    x = Conv2D(128, 1, activation='relu', padding='valid')(x)
-    x = Conv2D(num_classes, 1, activation='relu', padding='valid')(x)
+    x = Conv2D(64, 3)(x)
+    x = LeakyReLU()(x)
+    x = Conv2D(64, 3)(x)
+    x = LeakyReLU()(x)
+    x = Conv2D(128, 1)(x)
+    x = LeakyReLU()(x)
+
+    x = Conv2D(num_classes, 1)(x)
+    x = Activation('softmax')(x)
 
     # x = Dropout(0.25) (x)
     x = Flatten()(x)
@@ -73,40 +81,33 @@ def buildModel():
     model = Model(inputs, x, name='mnist_cnn')
     model.summary()
 
-    # model = Sequential()
-    # model.add(Conv2D(32, kernel_size=(3, 3),
-    #                  activation='relu',
-    #                  input_shape=input_shape))
-    #
-    # model.add(Conv2D(64, (3, 3), activation='relu'))
-    # model.add(MaxPooling2D(pool_size=(2, 2)))
-    # model.add(Dropout(0.25))
-    # model.add(Flatten())
-    # model.add(Dense(128, activation='relu'))
-    # model.add(Dropout(0.5))
-    # model.add(Dense(num_classes, activation='softmax'))
-
     model.compile(loss=keras.losses.categorical_crossentropy,
                   optimizer=keras.optimizers.Adadelta(),
                   metrics=['accuracy'])
     return model
 
 if __name__ == '__main__':
-
     model = buildModel()
-    x_train, y_train, x_test, y_test = load_mnist()
-    # model.fit(x_train, y_train,
-    #           batch_size=batch_size,
-    #           epochs=epochs,
-    #           verbose=1,
-    #           validation_data=(x_test, y_test))
+    train = False
 
-    # model.save_weights('mnist_fcn_10.h5')
+    if train:
+        x_train, y_train, x_test, y_test = load_mnist()
 
-    model.load_weights('mnist_fcn_10.h5')
+        model.fit(x_train, y_train,
+                  batch_size=batch_size,
+                  epochs=epochs,
+                  verbose=1,
+                  validation_data=(x_test, y_test))
 
-    from conv_filter_visualization import visualize_layer
-    visualize_layer(model, 'conv2d_6', epochs=100)
-    # score = model.evaluate(x_test, y_test, verbose=0)
-    # print('Test loss:', score[0])
-    # print('Test accuracy:', score[1])
+        score = model.evaluate(x_test, y_test, verbose=0)
+        print('Test loss:', score[0])
+        print('Test accuracy:', score[1])
+
+        model.save_weights('mnist_fcn_lrelu_sm.h5')
+
+    else:
+        model.load_weights('mnist_fcn_lrelu_sm.h5')
+
+        from conv_filter_visualization import visualize_layer
+        visualize_layer(model, 'conv2d_1', step=1, epochs=200, init='train_random')
+
